@@ -1,169 +1,147 @@
-
 #include <iostream>
 #include <Windows.h>
 #include <wincrypt.h>
-#include <string>
-#include <vector>
-#include <dbghelp.h>
-#include <stdexcept>
-#include <wintrust.h>
-#include <DbgHelp.h>
+#include <stdio.h>
+#include <wincrypt.h>
+#include <WinTrust.h>
+#include <SoftPub.h>
+#include <imagehlp.h>
 
-#pragma comment(lib, "crypt32.lib")
-#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "Crypt32.lib")
+#pragma comment(lib, "Wintrust.lib")
+#pragma comment(lib, "Imagehlp.lib")
 
 
-bool verify(HMODULE hModule, const std::wstring& caName) {
-    bool isVerified = false;
-    LPVOID lpData = nullptr;
-    SIZE_T dwSize = 0;
+typedef BOOL(WINAPI* PFN_CRYPT_VERIFY_DETACHED_MESSAGE_SIGNATURE)(
+    DWORD dwFlags,
+    PCRYPT_VERIFY_MESSAGE_PARA pVerifyPara,
+    DWORD dwSignerIndex,
+    const BYTE* pbDetachedSignBlob,
+    DWORD cbDetachedSignBlob,
+    const BYTE* pbToBeSignedBlob,
+    DWORD cbToBeSignedBlob,
+    PCCERT_CONTEXT* ppSignerCert
+    );
 
-    try {
-        // Get the base address of the module
-        lpData = (LPVOID)hModule;
-
-        // Get information about the module's memory region
-        MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery(lpData, &mbi, sizeof(mbi)) == 0) {
-            throw std::runtime_error("Failed to query module information");
-        }
-
-        // The size of the module is the size of its memory region
-        dwSize = mbi.RegionSize;
-
-        // Find the certificate in the module's resources
-        DWORD certSize = 0;
-        LPVOID certData = nullptr;
-        PIMAGE_NT_HEADERS ntHeaders = ImageNtHeader(lpData);
-        if (ntHeaders) {
-            DWORD certDirRva = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress;
-            certSize = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size;
-            if (certDirRva != 0 && certSize != 0) {
-                certData = static_cast<BYTE*>(lpData) + certDirRva;
-            }
-        }
-
-        if (certData == nullptr || certSize == 0) {
-            throw std::runtime_error("No certificate found in the module");
-        }
-
-        // Parse the WIN_CERTIFICATE structure
-        LPWIN_CERTIFICATE winCert = static_cast<LPWIN_CERTIFICATE>(certData);
-
-        // Open the system ROOT store
-        HCERTSTORE hRootStore = CertOpenSystemStore(NULL, L"ROOT");
-        if (!hRootStore) {
-            throw std::runtime_error("Failed to open ROOT certificate store");
-        }
-
-        // Create a message to verify
-        HCRYPTMSG hMsg = CryptMsgOpenToDecode(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, 0, 0, NULL, NULL);
-        if (!hMsg) {
-            CertCloseStore(hRootStore, 0);
-            throw std::runtime_error("Failed to open message for decoding");
-        }
-
-        // Update the message with the certificate data
-        if (!CryptMsgUpdate(hMsg, winCert->bCertificate, winCert->dwLength, TRUE)) {
-            CryptMsgClose(hMsg);
-            CertCloseStore(hRootStore, 0);
-            throw std::runtime_error("Failed to update message with certificate data");
-        }
-
-        // Get signer information
-        DWORD signerInfoSize = 0;
-        if (!CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, NULL, &signerInfoSize)) {
-            CryptMsgClose(hMsg);
-            CertCloseStore(hRootStore, 0);
-            throw std::runtime_error("Failed to get signer info size");
-        }
-
-        std::vector<BYTE> signerInfo(signerInfoSize);
-        if (!CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, signerInfo.data(), &signerInfoSize)) {
-            CryptMsgClose(hMsg);
-            CertCloseStore(hRootStore, 0);
-            throw std::runtime_error("Failed to get signer info");
-        }
-
-        PCMSG_SIGNER_INFO pSignerInfo = (PCMSG_SIGNER_INFO)signerInfo.data();
-
-        // Find the signer certificate in the store
-        CERT_INFO certInfo;
-        certInfo.Issuer = pSignerInfo->Issuer;
-        certInfo.SerialNumber = pSignerInfo->SerialNumber;
-
-        PCCERT_CONTEXT pCertContext = CertFindCertificateInStore(hRootStore,
-            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_SUBJECT_CERT, &certInfo, NULL);
-
-        if (!pCertContext) {
-            CryptMsgClose(hMsg);
-            CertCloseStore(hRootStore, 0);
-            throw std::runtime_error("Signer certificate not found in ROOT store");
-        }
-
-        // Verify the certificate chain
-        CERT_CHAIN_PARA chainPara = { sizeof(CERT_CHAIN_PARA) };
-        PCCERT_CHAIN_CONTEXT pChainContext = nullptr;
-
-        if (!CertGetCertificateChain(NULL, pCertContext, NULL, hRootStore, &chainPara, 0, NULL, &pChainContext)) {
-            CertFreeCertificateContext(pCertContext);
-            CryptMsgClose(hMsg);
-            CertCloseStore(hRootStore, 0);
-            throw std::runtime_error("Failed to get certificate chain");
-        }
-
-        // Check if the certificate is issued by the specified CA
-        for (DWORD i = 0; i < pChainContext->cChain; i++) {
-            for (DWORD j = 0; j < pChainContext->rgpChain[i]->cElement; j++) {
-                CERT_INFO* certInfo = pChainContext->rgpChain[i]->rgpElement[j]->pCertContext->pCertInfo;
-                DWORD nameSize = CertGetNameStringW(pChainContext->rgpChain[i]->rgpElement[j]->pCertContext,
-                    CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_NAME_ISSUER_FLAG, NULL, NULL, 0);
-                std::vector<wchar_t> nameBuffer(nameSize);
-                CertGetNameStringW(pChainContext->rgpChain[i]->rgpElement[j]->pCertContext,
-                    CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_NAME_ISSUER_FLAG, NULL, nameBuffer.data(), nameSize);
-
-                if (caName == std::wstring(nameBuffer.data())) {
-                    isVerified = true;
-                    break;
-                }
-            }
-            if (isVerified) break;
-        }
-
-        // Clean up
-        CertFreeCertificateChain(pChainContext);
-        CertFreeCertificateContext(pCertContext);
-        CryptMsgClose(hMsg);
-        CertCloseStore(hRootStore, 0);
-
-    }
-    catch (const std::exception& e) {
-        // Handle any exceptions (you might want to log this)
-        OutputDebugStringA(e.what());
+bool IsDllSignatureVerified(HMODULE hModule) {
+    // Get the DOS header
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        return false;
     }
 
-    return isVerified;
+    // Get the NT headers
+    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hModule + dosHeader->e_lfanew);
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
+        return false;
+    }
+
+    // Find the security directory
+    DWORD secDirRva = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress;
+    DWORD secDirSize = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size;
+
+    if (secDirRva == 0 || secDirSize == 0) {
+        return false; // No security directory
+    }
+
+    // Get the certificate data
+    LPWIN_CERTIFICATE winCert = (LPWIN_CERTIFICATE)((BYTE*)hModule + secDirRva);
+
+    // Load the Crypt32.dll dynamically
+    HMODULE hCrypt32 = LoadLibraryW(L"Crypt32.dll");
+    if (hCrypt32 == NULL) {
+        return false;
+    }
+
+    PFN_CRYPT_VERIFY_DETACHED_MESSAGE_SIGNATURE pCryptVerifyDetachedMessageSignature =
+        (PFN_CRYPT_VERIFY_DETACHED_MESSAGE_SIGNATURE)GetProcAddress(hCrypt32, "CryptVerifyDetachedMessageSignature");
+
+    if (pCryptVerifyDetachedMessageSignature == NULL) {
+        FreeLibrary(hCrypt32);
+        return false;
+    }
+
+    // Set up verification parameters
+    CRYPT_VERIFY_MESSAGE_PARA verifyPara = { 0 };
+    verifyPara.cbSize = sizeof(CRYPT_VERIFY_MESSAGE_PARA);
+    verifyPara.dwMsgAndCertEncodingType = X509_ASN_ENCODING | PKCS_7_ASN_ENCODING;
+
+    // Extract the actual signature from the WIN_CERTIFICATE structure
+    DWORD signatureOffset = sizeof(DWORD) + sizeof(WORD) + sizeof(WORD); // dwLength + wRevision + wCertificateType
+    const BYTE* signature = winCert->bCertificate + signatureOffset;
+    DWORD signatureSize = winCert->dwLength - signatureOffset;
+
+    // The data to be signed is everything up to the security directory
+    const BYTE* dataToSign = (const BYTE*)hModule;
+    DWORD dataToSignSize = secDirRva;
+
+    // Verify the signature
+    PCCERT_CONTEXT pSignerCert = NULL;
+    BOOL result = FALSE;
+
+        result = pCryptVerifyDetachedMessageSignature(
+            0,  // dwFlags
+            &verifyPara,
+            0,  // dwSignerIndex
+            signature,
+            signatureSize,
+            dataToSign,
+            dataToSignSize,
+            &pSignerCert
+        );
+
+
+        result = FALSE;
+
+    // Clean up
+    if (pSignerCert) {
+        CertFreeCertificateContext(pSignerCert);
+    }
+    FreeLibrary(hCrypt32);
+
+    return result != FALSE;
 }
-int main() {
-    // Load kernel32.dll
-    HMODULE hModule = GetModuleHandle(L"kernel32.dll");
-    if (hModule == NULL) {
-        std::cerr << "Failed to get handle to kernel32.dll" << std::endl;
-        return 1;
+
+
+// Function to load the DLL and return the HMODULE handle
+HMODULE LoadMyDLL()
+{
+    // Path to the DLL on the desktop
+    const char* dllPath = "C:\\FOSS\\mydll.dll";
+
+    // Load the DLL
+    HMODULE hModule = LoadLibraryA(dllPath);
+
+    // Check if the DLL was loaded successfully
+    if (hModule == NULL)
+    {
+        std::cerr << "Failed to load DLL. Error: " << GetLastError() << std::endl;
+    }
+    else
+    {
+        std::cout << "DLL loaded successfully." << std::endl;
     }
 
-    // The CA name for Microsoft Windows
-    std::wstring caName = L"Microsoft Windows";
+    // Return the handle to the DLL
+    return hModule;
+}
 
-    // Verify the DLL
-    bool isVerified = verify(hModule, caName);
+int main() {
+    // Load the DLL and get the handle
+    HMODULE hModule = LoadMyDLL();
 
+    bool isVerified = IsDllSignatureVerified(hModule);
+    // If needed, you can now use the hModule to get function pointers from the DLL
     if (isVerified) {
-        std::cout << "kernel32.dll is verified and signed by Microsoft Windows." << std::endl;
+        std::cout << "DLL signature is verified." << std::endl;
     }
     else {
-        std::cout << "kernel32.dll verification failed or it's not signed by Microsoft Windows." << std::endl;
+        std::cout << "DLL signature is not verified." << std::endl;
     }
-
-    return 0;
+    // When done with the DLL, free it
+    if (hModule != NULL)
+    {
+        FreeLibrary(hModule);
+        std::cout << "DLL unloaded successfully." << std::endl;
+    }
 }
