@@ -9,7 +9,7 @@ makecert -pe -n "CN=CodeSignCert" -ss my -sr LocalMachine -a sha256 -sky signatu
 pvk2pfx -pvk CodeSignCert.pvk -spc CodeSignCert.cer -pfx CodeSignCert.pfx -po <YOUR_PASSWORD>
 signtool sign /f CodeSignCert.pfx /p <YOUR_PASSWORD> /t http://timestamp.digicert.com <FILE_PATH>
 ```
-Then import the cert to the authorized certificate by 
+Then import this unauthorized certificate to the authorized certificates file by 
 
 WIN+R, MMC, FILE, ADD SNAP-IN, ADD CERTIFICATES, Right Click on Authorized CAs, All tasks, import, choose RootCert.cer.
 
