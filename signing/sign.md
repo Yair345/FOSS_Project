@@ -1,6 +1,6 @@
 To sign your own files you need to create an authorized certificate first.
 
-Download windows SDK signing tools, run cmd as adminstrator, execute this and fill YOUR_PASSWORD with your password and FILE_PATH with the file's path:
+Download windows SDK signing tools, run cmd as adminstrator, execute this and fill <YOUR_PASSWORD> with your password and <FILE_PATH> with the file's path:
 
 ```
 cd C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64
