@@ -51,8 +51,6 @@ HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 		// if verify
 		LPVOID executableDll = ConvertDatafileDllToExecutable(hDataFile);
 
-		// where to free it???
-
 		return (HMODULE)executableDll;
 	}
 
@@ -231,69 +229,58 @@ LPVOID ConvertDatafileDllToExecutable(HMODULE hDataFile)
 	if (!hDataFile)
 		return NULL;
 
-	// Get the size of the loaded module
+	// Get the module information
 	MODULEINFO moduleInfo;
 	if (!GetModuleInformation(GetCurrentProcess(), hDataFile, &moduleInfo, sizeof(moduleInfo)))
-		return NULL;
-
-	SIZE_T dllSize = moduleInfo.SizeOfImage;
-
-	// Allocate new memory with execute permissions
-	LPVOID newBase = VirtualAlloc(NULL, dllSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-	if (!newBase)
-		return NULL;
-
-	// Copy the DLL content to the new memory location
-	memcpy(newBase, (LPVOID)hDataFile, dllSize);
-
-	// Get the DOS header
-	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)newBase;
-	if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
 	{
-		VirtualFree(newBase, 0, MEM_RELEASE);
+		FreeLibrary(hDataFile);
 		return NULL;
 	}
 
-	// Get the NT headers
-	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)newBase + dosHeader->e_lfanew);
-	if (ntHeader->Signature != IMAGE_NT_SIGNATURE)
+	// Change the protection to PAGE_EXECUTE_READWRITE temporarily
+	DWORD oldProtect;
+	if (!VirtualProtect(moduleInfo.lpBaseOfDll, moduleInfo.SizeOfImage, PAGE_EXECUTE_READWRITE, &oldProtect))
 	{
-		VirtualFree(newBase, 0, MEM_RELEASE);
+		FreeLibrary(hDataFile);
 		return NULL;
 	}
 
-	// Perform relocation if necessary
-	if (ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress)
+	// Calculate the delta for relocation
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)moduleInfo.lpBaseOfDll;
+	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)moduleInfo.lpBaseOfDll + dosHeader->e_lfanew);
+	ULONG_PTR delta = (ULONG_PTR)moduleInfo.lpBaseOfDll - ntHeader->OptionalHeader.ImageBase;
+
+	// Perform relocations
+	if (!RelocateImageBase(moduleInfo.lpBaseOfDll, delta))
 	{
-		ULONG_PTR delta = (ULONG_PTR)newBase - ntHeader->OptionalHeader.ImageBase;
-		if (delta != 0)
-		{
-			if (!RelocateImageBase(newBase, delta))
-			{
-				VirtualFree(newBase, 0, MEM_RELEASE);
-				return NULL;
-			}
-		}
+		FreeLibrary(hDataFile);
+		return NULL;
 	}
 
 	// Resolve imports
-	if (!ResolveImports(newBase))
+	if (!ResolveImports(moduleInfo.lpBaseOfDll))
 	{
-		VirtualFree(newBase, 0, MEM_RELEASE);
+		FreeLibrary(hDataFile);
 		return NULL;
 	}
 
-	// Call the DLL entry point if it exists
+	// Change protection back to PAGE_EXECUTE_READ
+	DWORD temp;
+	VirtualProtect(moduleInfo.lpBaseOfDll, moduleInfo.SizeOfImage, PAGE_EXECUTE_READ, &temp);
+
+	// Call DllMain if it exists
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)moduleInfo.lpBaseOfDll;
+	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)moduleInfo.lpBaseOfDll + dosHeader->e_lfanew);
 	BOOL(WINAPI * DllMain)(HINSTANCE, DWORD, LPVOID);
-	DllMain = (BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID))((LPBYTE)newBase + ntHeader->OptionalHeader.AddressOfEntryPoint);
+	DllMain = (BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID))((LPBYTE)moduleInfo.lpBaseOfDll + ntHeader->OptionalHeader.AddressOfEntryPoint);
 	if (DllMain)
 	{
-		if (!DllMain((HINSTANCE)newBase, DLL_PROCESS_ATTACH, NULL))
+		if (!DllMain((HINSTANCE)moduleInfo.lpBaseOfDll, DLL_PROCESS_ATTACH, NULL))
 		{
-			VirtualFree(newBase, 0, MEM_RELEASE);
+			FreeLibrary(hDataFile);
 			return NULL;
 		}
 	}
 
-	return newBase;
+	return hDataFile;
 }
