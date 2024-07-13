@@ -6,8 +6,6 @@
 
 #include <winnt.h>
 
-
-
 #include <softpub.h>
 
 #include <Psapi.h>
@@ -77,16 +75,11 @@ BOOL verifyFileSignature(LPCWSTR oldfilePath) {
     WinVerifyTrust(NULL, &policyGUID, &winTrustData);
 
 
-
     return (status == ERROR_SUCCESS);
 
 }
 
-// Function to write a buffer to a file
-
-
-
-
+// Function to write a buffer to a file and verify the file
 
 BOOL WriteDllToFile(HMODULE hModule, const WCHAR* outputFilePath) {
 
@@ -161,7 +154,6 @@ BOOL WriteDllToFile(HMODULE hModule, const WCHAR* outputFilePath) {
     }
 
 
-
     // Copy the headers
     memcpy(fileBuffer,hModule, fileSize);
 
@@ -182,6 +174,9 @@ BOOL WriteDllToFile(HMODULE hModule, const WCHAR* outputFilePath) {
 
     BOOL result = WriteFile(hFile, fileBuffer, fileSize, &bytesWritten, NULL);
 
+    // Verify the temporary file
+
+    BOOL verifyResult = verifyFileSignature(outputFilePath);
 
 
     // Clean up
@@ -190,22 +185,14 @@ BOOL WriteDllToFile(HMODULE hModule, const WCHAR* outputFilePath) {
 
     VirtualFree(fileBuffer, 0, MEM_RELEASE);
 
-
-
     return result && (bytesWritten == fileSize);
 
 }
 
 
-
-
-
-
-
 // Function to read a DLL from an HMODULE and write to a file for verification
 
 BOOL VerifyDllFromHModule(HMODULE hModule) {
-
 
 
     // Write the DLL content to a temporary file
@@ -218,30 +205,19 @@ BOOL VerifyDllFromHModule(HMODULE hModule) {
 
     }
 
-
-
-
-
+    // Write to file and verify
     BOOL is = WriteDllToFile(hModule, (const WCHAR*)tempFilePath);
-
-    // Verify the temporary file
-
-    BOOL verifyResult = verifyFileSignature(tempFilePath);
 
     DeleteFile(tempFilePath);
 
-
-
-    return verifyResult;
+    return is;
 
 }
 
 
-
-
-
 int main() {
 
+    //HMODULE hModule = LoadLibraryEx(L"C:\\SECURE\\FNV.dll", nullptr, LOAD_LIBRARY_AS_DATAFILE);
     HMODULE hModule = LoadLibraryEx(L"C:\\Windows\\System32\\version.dll", nullptr, LOAD_LIBRARY_AS_DATAFILE);
 
     if (hModule == NULL) {
@@ -267,8 +243,6 @@ int main() {
         printf("The DLL verification failed.\n");
 
     }
-
-
 
     FreeLibrary(hModule);
 
