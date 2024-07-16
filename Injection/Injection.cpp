@@ -3,8 +3,7 @@
 #include <tlhelp32.h>
 
 
-#define DLL_NAME "HOOKDLL.dll"
-#define NAME L"notepad.exe" // proccess's name
+#define NAME L"test_exe.exe" // proccess's name
 #define WIN32_LEAN_AND_MEAN
 #define BUFSIZE 4096
 
@@ -12,7 +11,7 @@ DWORD PIDFind(const std::wstring& processName);
 
 int main()
 {
-	LPCSTR dllname = "HOOKDLL.dll"; //the dll is in the injector project file
+	LPCSTR dllname = "Injected.dll"; //the dll is in the injector project file
 	CHAR  dllPath[BUFSIZE];
 	LPSTR* pPath = NULL;
 
@@ -40,7 +39,7 @@ int main()
 
 	// Get a pointer to memory location in remote process,
 	// big enough to store DLL path
-	LPVOID memAddr = (LPVOID)VirtualAllocEx(targetProcess, NULL, strlen((char*)dllPath) + 1, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+	LPVOID memAddr = (LPVOID)VirtualAllocEx(targetProcess, NULL, pathlen + 1, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 	if (!memAddr) 
 	{
 		err = GetLastError();
@@ -49,7 +48,7 @@ int main()
 	}
 
 	// Write DLL name to remote process memory
-	bool check = WriteProcessMemory(targetProcess, (LPVOID)memAddr, dllPath, strlen((char*)dllPath) + 1, NULL);
+	bool check = WriteProcessMemory(targetProcess, (LPVOID)memAddr, dllPath, pathlen + 1, NULL);
 	if (!check) 
 	{
 		err = GetLastError();
@@ -59,7 +58,8 @@ int main()
 
 	// Open remote thread, while executing LoadLibrary
 	// with parameter DLL name, will trigger DLLMain
-	HANDLE hRemote = CreateRemoteThread(targetProcess, NULL, NULL, (LPTHREAD_START_ROUTINE)addrLoadLibrary, (LPVOID)memAddr, NULL, NULL);
+	DWORD threadId;
+	HANDLE hRemote = CreateRemoteThread(targetProcess, NULL, NULL, (LPTHREAD_START_ROUTINE)addrLoadLibrary, (LPVOID)memAddr, NULL, &threadId);
 	if (!hRemote) 
 	{
 		int err = GetLastError();
