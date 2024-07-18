@@ -9,5 +9,11 @@
 
 // add headers that you want to pre-compile here
 #include "framework.h"
+#include <Windows.h>
+#include <iostream>
+#include <unordered_map>
+#include <string>
+#include <thread>
+#include <atomic>
 
 #endif //PCH_H

@@ -9,10 +9,18 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address);
 HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName);
 bool RelocateImageBase(LPVOID newBase, ULONG_PTR delta);
 bool ResolveImports(LPVOID newBase);
-LPVOID ConvertDatafileDllToExecutable(HMODULE hDataFile);
-BOOL GetModuleInformationManual(HMODULE hModule, LPMODULEINFO lpmodinfo, DWORD cb);
-FARPROC ManualGetProcAddress(HMODULE hModule, LPCSTR lpProcName);
 HMODULE LoadDllManually(HMODULE hModule);
+
+// Add these structure definitions
+typedef struct BASE_RELOCATION_BLOCK {
+	DWORD PageAddress;
+	DWORD BlockSize;
+} BASE_RELOCATION_BLOCK, * PBASE_RELOCATION_BLOCK;
+
+typedef struct BASE_RELOCATION_ENTRY {
+	USHORT Offset : 12;
+	USHORT Type : 4;
+} BASE_RELOCATION_ENTRY, * PBASE_RELOCATION_ENTRY;
 
 
 // Original LoadLibraryA function pointer
@@ -44,10 +52,10 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 
 HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 {
-	printf("LoadLibraryAndCheckDll called with: %s\n", lpLibFileName);
-	std::cin.get();
+	// printf("LoadLibraryAndCheckDll called with: %s\n", lpLibFileName);
+	// std::cin.get();
 
-	HMODULE hDataFile = LoadLibraryExA(lpLibFileName, NULL, DONT_RESOLVE_DLL_REFERENCES);
+	HMODULE hDataFile = LoadLibraryExA(lpLibFileName, NULL, LOAD_LIBRARY_AS_DATAFILE);
 
 	if (hDataFile)
 	{
@@ -152,155 +160,117 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address)
 
 HMODULE LoadDllManually(HMODULE hModule)
 {
-	printf("shit0\n");
+	hModule = (HMODULE)((ULONG_PTR)hModule & ~((ULONG_PTR)0xffff));
+	
 	// Get the DOS and NT headers
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
 	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)hModule + dosHeader->e_lfanew);
-	printf("shit1\n");
 
+	// Calculate the size of the image
+	SIZE_T imageSize = ntHeader->OptionalHeader.SizeOfImage;
+
+	// Allocate new memory for the DLL
+	LPVOID newBase = VirtualAlloc(NULL, imageSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	if (newBase == NULL)
+	{
+		printf("Failed to allocate memory for the DLL\n");
+		return NULL;
+	}
+
+	// Copy the headers
+	memcpy(newBase, hModule, ntHeader->OptionalHeader.SizeOfHeaders);
+
+	// Copy the sections
+	PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(ntHeader);
+	for (UINT i = 0; i < ntHeader->FileHeader.NumberOfSections; i++, section++)
+	{
+		if (section->SizeOfRawData > 0)
+		{
+			LPVOID dest = (LPVOID)((LPBYTE)newBase + section->VirtualAddress);
+			LPVOID src = (LPVOID)((LPBYTE)hModule + section->PointerToRawData);
+			memcpy(dest, src, section->SizeOfRawData);
+		}
+	}
 
 	// Calculate the delta between the preferred load address and the actual load address
-	ULONG_PTR delta = (ULONG_PTR)hModule - ntHeader->OptionalHeader.ImageBase;
-	printf("shit2\n");
+	ULONG_PTR delta = (ULONG_PTR)newBase - ntHeader->OptionalHeader.ImageBase;
 
 	// Perform base relocation if necessary
-	if (delta != 0) 
+	if (delta != 0)
 	{
-		if (!RelocateImageBase(hModule, delta)) 
+		if (!RelocateImageBase(newBase, delta))
 		{
-			FreeLibrary(hModule);
+			VirtualFree(newBase, 0, MEM_RELEASE);
 			return NULL;
 		}
 	}
 
 	// Resolve imports
-	if (!ResolveImports(hModule)) 
+	if (!ResolveImports(newBase))
 	{
-		FreeLibrary(hModule);
+		VirtualFree(newBase, 0, MEM_RELEASE);
 		return NULL;
 	}
 
-	printf("hello1\n");
-
 	// Get the address of DllMain
-	LPVOID dllMainAddress = (LPVOID)((LPBYTE)hModule + ntHeader->OptionalHeader.AddressOfEntryPoint);
-
-	//// Change memory protection to allow execution
-	//DWORD oldProtect;
-	//if (!VirtualProtect(dllMainAddress, ntHeader->OptionalHeader.SizeOfCode, PAGE_EXECUTE_READ, &oldProtect)) {
-	//	printf("Failed to change memory protection. Error: %d\n", GetLastError());
-	//	FreeLibrary(hModule);
-	//	return NULL;
-	//}
-	//
-	//printf("%x\n", oldProtect);
+	LPVOID dllMainAddress = (LPVOID)((LPBYTE)newBase + ntHeader->OptionalHeader.AddressOfEntryPoint);
 
 	// Call DllMain with DLL_PROCESS_ATTACH
 	typedef BOOL(WINAPI* DllMain_t)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
 	DllMain_t dllMain = (DllMain_t)dllMainAddress;
 
-	printf("%p\n", dllMain);
-
 	if (dllMain != NULL) {
-		printf("hello3\n");
 		BOOL result = FALSE;
 		__try {
-			result = dllMain((HINSTANCE)hModule, DLL_PROCESS_ATTACH, NULL);
+			result = dllMain((HINSTANCE)newBase, DLL_PROCESS_ATTACH, NULL);
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER) {
 			printf("Exception in DllMain: 0x%x\n", GetExceptionCode());
-			FreeLibrary(hModule);
+			VirtualFree(newBase, 0, MEM_RELEASE);
 			return NULL;
 		}
-		printf("hello4\n");
 		if (!result) {
-			FreeLibrary(hModule);
+			VirtualFree(newBase, 0, MEM_RELEASE);
 			return NULL;
 		}
 	}
 
-	//// Restore the original memory protection
-	//DWORD temp;
-	//VirtualProtect(dllMainAddress, ntHeader->OptionalHeader.SizeOfCode, oldProtect, &temp);
-
-	return hModule;
+	return (HMODULE)newBase;
 }
 
 bool RelocateImageBase(LPVOID newBase, ULONG_PTR delta)
 {
-	printf("bye0\n");
-
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)newBase;
 	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)newBase + dosHeader->e_lfanew);
 
-	printf("bye1\n");
+	IMAGE_DATA_DIRECTORY relocations = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+	DWORD_PTR relocationTable = relocations.VirtualAddress + (DWORD_PTR)newBase;
+	DWORD relocationsProcessed = 0;
 
-	// Check if there's a relocation directory
-	if (ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress == 0)
+	while (relocationsProcessed < relocations.Size)
 	{
-		// No relocations needed
-		return true;
-	}
-	printf("bye2\n");
+		PBASE_RELOCATION_BLOCK relocationBlock = (PBASE_RELOCATION_BLOCK)(relocationTable + relocationsProcessed);
+		relocationsProcessed += sizeof(BASE_RELOCATION_BLOCK);
+		DWORD relocationsCount = (relocationBlock->BlockSize - sizeof(BASE_RELOCATION_BLOCK)) / sizeof(BASE_RELOCATION_ENTRY);
 
-	PIMAGE_BASE_RELOCATION relocation = (PIMAGE_BASE_RELOCATION)((LPBYTE)newBase +
-		ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
+		PBASE_RELOCATION_ENTRY relocationEntries = (PBASE_RELOCATION_ENTRY)(relocationTable + relocationsProcessed);
 
-	printf("bye3\n");
-
-	while (relocation->VirtualAddress)
-	{
-		DWORD count = (relocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-		PWORD typeOffset = (PWORD)(relocation + 1);
-
-		for (DWORD i = 0; i < count; i++)
+		for (DWORD i = 0; i < relocationsCount; i++)
 		{
-			if (typeOffset[i] >> 12 == IMAGE_REL_BASED_HIGHLOW)
+			relocationsProcessed += sizeof(BASE_RELOCATION_ENTRY);
+
+			if (relocationEntries[i].Type == 0)
 			{
-				PDWORD address = (PDWORD)((LPBYTE)newBase + relocation->VirtualAddress + (typeOffset[i] & 0xFFF));
-
-				// Change protection to allow writing
-				DWORD oldProtect;
-				if (VirtualProtect(address, sizeof(DWORD), PAGE_READWRITE, &oldProtect))
-				{
-					*address += (DWORD)delta;
-
-					// Restore original protection
-					DWORD temp;
-					VirtualProtect(address, sizeof(DWORD), oldProtect, &temp);
-				}
-				else
-				{
-					// Handle error
-					return false;
-				}
+				continue;
 			}
-#ifdef _WIN64
-			else if (typeOffset[i] >> 12 == IMAGE_REL_BASED_DIR64)
-			{
-				PULONGLONG address = (PULONGLONG)((LPBYTE)newBase + relocation->VirtualAddress + (typeOffset[i] & 0xFFF));
 
-
-				// Change protection to allow writing
-				DWORD oldProtect;
-				if (VirtualProtect(address, sizeof(ULONGLONG), PAGE_READWRITE, &oldProtect))
-				{
-					*address += delta;
-
-					// Restore original protection
-					DWORD temp;
-					VirtualProtect(address, sizeof(ULONGLONG), oldProtect, &temp);
-				}
-				else
-				{
-					// Handle error
-					return false;
-				}
-			}
-#endif
+			DWORD_PTR relocationRVA = relocationBlock->PageAddress + relocationEntries[i].Offset;
+			DWORD_PTR addressToPatch = 0;
+			ReadProcessMemory(GetCurrentProcess(), (LPCVOID)((DWORD_PTR)newBase + relocationRVA), &addressToPatch, sizeof(DWORD_PTR), NULL);
+			addressToPatch += delta;
+			std::memcpy((PVOID)((DWORD_PTR)newBase + relocationRVA), &addressToPatch, sizeof(DWORD_PTR));
+			
 		}
-
-		relocation = (PIMAGE_BASE_RELOCATION)((LPBYTE)relocation + relocation->SizeOfBlock);
 	}
 
 	return true;
@@ -311,276 +281,45 @@ bool ResolveImports(LPVOID newBase)
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)newBase;
 	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)newBase + dosHeader->e_lfanew);
 
-	PIMAGE_IMPORT_DESCRIPTOR importDesc = (PIMAGE_IMPORT_DESCRIPTOR)((LPBYTE)newBase +
-		ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+	PIMAGE_IMPORT_DESCRIPTOR importDescriptor = NULL;
+	IMAGE_DATA_DIRECTORY importsDirectory = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	importDescriptor = (PIMAGE_IMPORT_DESCRIPTOR)(importsDirectory.VirtualAddress + (DWORD_PTR)newBase);
+	LPCSTR libraryName = "";
+	HMODULE library = NULL;
 
-	if (importDesc == (PIMAGE_IMPORT_DESCRIPTOR)newBase) {
-		// No import directory
-		return true;
-	}
-
-	while (importDesc->Name)
+	while (importDescriptor->Name != NULL)
 	{
-		PSTR libName = (PSTR)((LPBYTE)newBase + importDesc->Name);
-		HMODULE hModule = original_LoadLibraryA(libName);
+		libraryName = (LPCSTR)importDescriptor->Name + (DWORD_PTR)newBase;
+		library = LoadLibraryA(libraryName);
 
-		if (!hModule)
-			return false;
+		if (library)
+		{
+			PIMAGE_THUNK_DATA thunk = NULL;
+			thunk = (PIMAGE_THUNK_DATA)((DWORD_PTR)newBase + importDescriptor->FirstThunk);
 
-		PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)((LPBYTE)newBase + importDesc->FirstThunk);
-		PIMAGE_THUNK_DATA originalThunk = (PIMAGE_THUNK_DATA)((LPBYTE)newBase + importDesc->OriginalFirstThunk);
-
-		// Change memory protection to allow writing
-		DWORD oldProtect;
-		if (!VirtualProtect(thunk, sizeof(IMAGE_THUNK_DATA) * 100, PAGE_READWRITE, &oldProtect))
+			while (thunk->u1.AddressOfData != NULL)
+			{
+				if (IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal))
+				{
+					LPCSTR functionOrdinal = (LPCSTR)IMAGE_ORDINAL(thunk->u1.Ordinal);
+					thunk->u1.Function = (DWORD_PTR)GetProcAddress(library, functionOrdinal);
+				}
+				else
+				{
+					PIMAGE_IMPORT_BY_NAME functionName = (PIMAGE_IMPORT_BY_NAME)((DWORD_PTR)newBase + thunk->u1.AddressOfData);
+					DWORD_PTR functionAddress = (DWORD_PTR)GetProcAddress(library, functionName->Name);
+					thunk->u1.Function = functionAddress;
+				}
+				++thunk;
+			}
+		}
+		else
 		{
 			return false;
 		}
 
-		while (originalThunk->u1.AddressOfData)
-		{
-			FARPROC func;
-
-			if (IMAGE_SNAP_BY_ORDINAL(originalThunk->u1.Ordinal))
-			{
-				func = ManualGetProcAddress(hModule, (LPCSTR)(originalThunk->u1.Ordinal & 0xFFFF));
-			}
-			else
-			{
-				PIMAGE_IMPORT_BY_NAME importByName = (PIMAGE_IMPORT_BY_NAME)((LPBYTE)newBase + originalThunk->u1.AddressOfData);
-				func = ManualGetProcAddress(hModule, (LPCSTR)importByName->Name);
-			}
-
-			if (!func)
-				return false;
-
-			thunk->u1.Function = (ULONGLONG)func;
-
-			originalThunk++;
-			thunk++;
-		}
-
-		DWORD temp;
-		VirtualProtect((LPVOID)((LPBYTE)newBase + importDesc->FirstThunk), sizeof(IMAGE_THUNK_DATA) * 100, oldProtect, &temp);
-
-		importDesc++;
+		importDescriptor++;
 	}
 
 	return true;
-}
-
-LPVOID ConvertDatafileDllToExecutable(HMODULE hDataFile)
-{
-	if (!hDataFile)
-	{
-		printf("Invalid hDataFile\n");
-		return NULL;
-	}
-
-	// Adjust the base address
-	LPVOID baseAddress = (LPVOID)((ULONG_PTR)hDataFile & ~(ULONG_PTR)3);
-	printf("Adjusted base address: 0x%p\n", baseAddress);
-
-	// Verify DOS header
-	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
-	if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-	{
-		printf("Invalid DOS signature: 0x%X\n", dosHeader->e_magic);
-		return NULL;
-	}
-
-	// Verify NT headers
-	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)baseAddress + dosHeader->e_lfanew);
-	if (ntHeader->Signature != IMAGE_NT_SIGNATURE)
-	{
-		printf("Invalid NT signature: 0x%X\n", ntHeader->Signature);
-		return NULL;
-	}
-
-	printf("DOS header e_lfanew: 0x%X\n", dosHeader->e_lfanew);
-	printf("NT headers ImageBase: 0x%p, SizeOfImage: %u\n",
-		(LPVOID)ntHeader->OptionalHeader.ImageBase, ntHeader->OptionalHeader.SizeOfImage);
-
-	// Calculate the delta for relocation
-	ULONG_PTR delta = (ULONG_PTR)baseAddress - ntHeader->OptionalHeader.ImageBase;
-	printf("Relocation delta: 0x%p\n", (LPVOID)delta);
-
-	// Instead of trying to change protection, let's analyze the DLL structure
-	PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(ntHeader);
-	for (WORD i = 0; i < ntHeader->FileHeader.NumberOfSections; i++)
-	{
-		printf("Section %d: Name=%s, VirtualAddress=0x%X, SizeOfRawData=0x%X, Characteristics=0x%X\n",
-			i, section->Name, section->VirtualAddress, section->SizeOfRawData, section->Characteristics);
-		section++;
-	}
-
-	// Perform relocations (if necessary)
-	if (delta != 0)
-	{
-		if (!RelocateImageBase(baseAddress, delta))
-		{
-			printf("RelocateImageBase failed\n");
-			return NULL;
-		}
-	}
-	printf("hello\n");
-
-	// Resolve imports
-	if (!ResolveImports(baseAddress))
-	{
-		printf("ResolveImports failed\n");
-		return NULL;
-	}
-
-	printf("DLL analysis complete. Base address: 0x%p\n", baseAddress);
-	return baseAddress;
-}
-
-BOOL GetModuleInformationManual(HMODULE hModule, LPMODULEINFO lpmodinfo, DWORD cb)
-{
-	if (!hModule || !lpmodinfo || cb < sizeof(MODULEINFO))
-	{
-		SetLastError(ERROR_INVALID_PARAMETER);
-		printf("Invalid parameters passed to GetModuleInformationManual\n");
-		return FALSE;
-	}
-
-	// For LOAD_LIBRARY_AS_DATAFILE, the returned handle is the base address + 1
-	LPVOID baseAddress = (LPVOID)((ULONG_PTR)hModule & ~(ULONG_PTR)3);
-
-	printf("Base address: 0x%p\n", baseAddress);
-
-	// Try to read the DOS header without changing protection
-	__try
-	{
-		PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
-		if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-		{
-			SetLastError(ERROR_BAD_EXE_FORMAT);
-			printf("Invalid DOS signature: 0x%X\n", dosHeader->e_magic);
-			return FALSE;
-		}
-
-		PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)baseAddress + dosHeader->e_lfanew);
-		if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
-		{
-			SetLastError(ERROR_BAD_EXE_FORMAT);
-			printf("Invalid NT signature: 0x%X\n", ntHeaders->Signature);
-			return FALSE;
-		}
-
-		// Fill in the MODULEINFO structure
-		lpmodinfo->lpBaseOfDll = baseAddress;
-		lpmodinfo->SizeOfImage = ntHeaders->OptionalHeader.SizeOfImage;
-		lpmodinfo->EntryPoint = (LPVOID)((BYTE*)baseAddress + ntHeaders->OptionalHeader.AddressOfEntryPoint);
-
-		printf("Module information retrieved successfully:\n");
-		printf("Base address: 0x%p\n", lpmodinfo->lpBaseOfDll);
-		printf("Size of image: %u bytes\n", lpmodinfo->SizeOfImage);
-		printf("Entry point: 0x%p\n", lpmodinfo->EntryPoint);
-
-		return TRUE;
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		DWORD exceptionCode = GetExceptionCode();
-		printf("Exception occurred while accessing memory: 0x%X\n", exceptionCode);
-
-		// If we get here, we couldn't read the memory directly. Let's try to use ReadProcessMemory.
-		IMAGE_DOS_HEADER dosHeader;
-		SIZE_T bytesRead;
-		if (!ReadProcessMemory(GetCurrentProcess(), baseAddress, &dosHeader, sizeof(IMAGE_DOS_HEADER), &bytesRead))
-		{
-			printf("ReadProcessMemory failed for DOS header. Error: %d\n", GetLastError());
-			return FALSE;
-		}
-
-		if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE)
-		{
-			SetLastError(ERROR_BAD_EXE_FORMAT);
-			printf("Invalid DOS signature: 0x%X\n", dosHeader.e_magic);
-			return FALSE;
-		}
-
-		IMAGE_NT_HEADERS ntHeaders;
-		if (!ReadProcessMemory(GetCurrentProcess(), (BYTE*)baseAddress + dosHeader.e_lfanew, &ntHeaders, sizeof(IMAGE_NT_HEADERS), &bytesRead))
-		{
-			printf("ReadProcessMemory failed for NT headers. Error: %d\n", GetLastError());
-			return FALSE;
-		}
-
-		if (ntHeaders.Signature != IMAGE_NT_SIGNATURE)
-		{
-			SetLastError(ERROR_BAD_EXE_FORMAT);
-			printf("Invalid NT signature: 0x%X\n", ntHeaders.Signature);
-			return FALSE;
-		}
-
-		// Fill in the MODULEINFO structure
-		lpmodinfo->lpBaseOfDll = baseAddress;
-		lpmodinfo->SizeOfImage = ntHeaders.OptionalHeader.SizeOfImage;
-		lpmodinfo->EntryPoint = (LPVOID)((BYTE*)baseAddress + ntHeaders.OptionalHeader.AddressOfEntryPoint);
-
-		printf("Module information retrieved successfully (via ReadProcessMemory):\n");
-		printf("Base address: 0x%p\n", lpmodinfo->lpBaseOfDll);
-		printf("Size of image: %u bytes\n", lpmodinfo->SizeOfImage);
-		printf("Entry point: 0x%p\n", lpmodinfo->EntryPoint);
-
-		return TRUE;
-	}
-}
-
-FARPROC ManualGetProcAddress(HMODULE hModule, LPCSTR lpProcName)
-{
-	// Get the DOS header
-	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
-	if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-	{
-		printf("Invalid DOS signature\n");
-		return NULL;
-	}
-
-	// Get the NT headers
-	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)hModule + dosHeader->e_lfanew);
-	if (ntHeader->Signature != IMAGE_NT_SIGNATURE)
-	{
-		printf("Invalid NT signature\n");
-		return NULL;
-	}
-
-	// Get the export directory
-	PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)((LPBYTE)hModule +
-		ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-
-	DWORD* addressOfFunctions = (DWORD*)((LPBYTE)hModule + exportDir->AddressOfFunctions);
-	DWORD* addressOfNames = (DWORD*)((LPBYTE)hModule + exportDir->AddressOfNames);
-	WORD* addressOfNameOrdinals = (WORD*)((LPBYTE)hModule + exportDir->AddressOfNameOrdinals);
-
-	// Check if we're looking up by ordinal
-	if ((DWORD_PTR)lpProcName >> 16 == 0)
-	{
-		WORD ordinal = (WORD)((DWORD_PTR)lpProcName & 0xFFFF);
-		if (ordinal < exportDir->Base || ordinal >= exportDir->Base + exportDir->NumberOfFunctions)
-		{
-			printf("Ordinal out of range\n");
-			return NULL;
-		}
-		DWORD functionRVA = addressOfFunctions[ordinal - exportDir->Base];
-		return (FARPROC)((LPBYTE)hModule + functionRVA);
-	}
-
-	// Look up by name
-	for (DWORD i = 0; i < exportDir->NumberOfNames; i++)
-	{
-		char* name = (char*)((LPBYTE)hModule + addressOfNames[i]);
-		if (strcmp(name, lpProcName) == 0)
-		{
-			WORD ordinal = addressOfNameOrdinals[i];
-			DWORD functionRVA = addressOfFunctions[ordinal];
-			return (FARPROC)((LPBYTE)hModule + functionRVA);
-		}
-	}
-
-	printf("Function %s not found\n", lpProcName);
-	return NULL;
 }
