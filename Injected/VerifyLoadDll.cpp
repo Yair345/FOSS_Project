@@ -5,11 +5,15 @@
 #include <iostream>
 
 
-int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address);
+int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool load);
 HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName);
 bool RelocateImageBase(LPVOID newBase, ULONG_PTR delta);
 bool ResolveImports(LPVOID newBase);
 HMODULE LoadDllManually(HMODULE hModule);
+bool ProcessExports(LPVOID baseAddress);
+bool IsDLLInUse(LPVOID baseAddress);
+void TrackAndFreeDLLs();
+FARPROC GetExportedFunction(LPVOID baseAddress, const char* functionName);
 
 // Add these structure definitions
 typedef struct BASE_RELOCATION_BLOCK {
@@ -23,9 +27,17 @@ typedef struct BASE_RELOCATION_ENTRY {
 } BASE_RELOCATION_ENTRY, * PBASE_RELOCATION_ENTRY;
 
 
+// Global variables
+LPVOID loadedModule;
+std::atomic<bool> shouldExit(false);
+
+
 // Original LoadLibraryA function pointer
 typedef HMODULE(WINAPI* pLoadLibraryA)(LPCSTR);
 pLoadLibraryA original_LoadLibraryA = NULL;
+
+typedef HMODULE(WINAPI* pGetProcAddress)(HMODULE, LPCSTR);
+pGetProcAddress original_GetProcAddress = NULL;
 
 BOOL APIENTRY DllMain(HMODULE hModule,
 	DWORD  ul_reason_for_call,
@@ -36,10 +48,14 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 	{
 	case DLL_PROCESS_ATTACH:
 	{
-		PCSTR func_to_hook = "LoadLibraryA";
+		PCSTR func_to_hook_load = "LoadLibraryA";
 		PCSTR DLL_to_hook = "KERNEL32.dll";
-		UINT_PTR new_func_address = (UINT_PTR)&LoadLibraryAndCheckDll;
-		hook(func_to_hook, DLL_to_hook, new_func_address);
+		UINT_PTR new_func_address_load = (UINT_PTR)&LoadLibraryAndCheckDll;
+		hook(func_to_hook_load, DLL_to_hook, new_func_address_load, true);
+
+		PCSTR func_to_hook_func = "GetProcAddress";
+		UINT_PTR new_func_address_func = (UINT_PTR)&GetExportedFunction;
+		hook(func_to_hook_func, DLL_to_hook, new_func_address_func, false);
 	}
 	break;
 	case DLL_THREAD_ATTACH:
@@ -62,13 +78,16 @@ HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 		// if verify
 		LPVOID executableDll = LoadDllManually(hDataFile);
 
+		std::thread trackingThread(TrackAndFreeDLLs);
+		trackingThread.detach();
+
 		return (HMODULE)executableDll;
 	}
 
 	return NULL;
 }
 
-int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address)
+int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool load)
 {
 	PIMAGE_DOS_HEADER dosHeader;
 	PIMAGE_NT_HEADERS NTHeader;
@@ -116,7 +135,7 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address)
 	// Look for the DLL which includes the function for hooking
 	while (importDescriptor->Characteristics != 0) {
 		DLL_name = (char*)(baseAddress + importDescriptor->Name);
-		printf("DLL name: %s\n", DLL_name);
+		// printf("DLL name: %s\n", DLL_name);
 		if (!strcmp(DLL_to_hook, DLL_name))
 			break;
 		importDescriptor++;
@@ -148,9 +167,17 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address)
 		thunkILT++;
 	}
 
+	if (load)
+	{
+		original_LoadLibraryA = (pLoadLibraryA)thunkIAT->u1.Function;
+	}
+	else
+	{
+		original_GetProcAddress = (pGetProcAddress)thunkIAT->u1.Function;
+	}
+
 	// Hook IAT: Write over function pointer
 	DWORD dwOld = NULL;
-	original_LoadLibraryA = (pLoadLibraryA)thunkIAT->u1.Function;
 	VirtualProtect((LPVOID) & (thunkIAT->u1.Function), sizeof(UINT_PTR), PAGE_READWRITE, &dwOld);
 	thunkIAT->u1.Function = new_func_address;
 	VirtualProtect((LPVOID) & (thunkIAT->u1.Function), sizeof(UINT_PTR), dwOld, NULL);
@@ -212,6 +239,12 @@ HMODULE LoadDllManually(HMODULE hModule)
 		return NULL;
 	}
 
+	if (!ProcessExports(newBase))
+	{
+		VirtualFree(newBase, 0, MEM_RELEASE);
+		return NULL;
+	}
+
 	// Get the address of DllMain
 	LPVOID dllMainAddress = (LPVOID)((LPBYTE)newBase + ntHeader->OptionalHeader.AddressOfEntryPoint);
 
@@ -234,6 +267,8 @@ HMODULE LoadDllManually(HMODULE hModule)
 			return NULL;
 		}
 	}
+
+	loadedModule = newBase;
 
 	return (HMODULE)newBase;
 }
@@ -322,4 +357,96 @@ bool ResolveImports(LPVOID newBase)
 	}
 
 	return true;
+}
+
+bool ProcessExports(LPVOID baseAddress)
+{
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
+	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)baseAddress + dosHeader->e_lfanew);
+
+	IMAGE_DATA_DIRECTORY exportDirectory = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+	if (exportDirectory.Size == 0)
+		return true; // No exports
+
+	PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)((LPBYTE)baseAddress + exportDirectory.VirtualAddress);
+
+	PDWORD functions = (PDWORD)((LPBYTE)baseAddress + exportDir->AddressOfFunctions);
+	PDWORD names = (PDWORD)((LPBYTE)baseAddress + exportDir->AddressOfNames);
+	PWORD ordinals = (PWORD)((LPBYTE)baseAddress + exportDir->AddressOfNameOrdinals);
+
+	for (DWORD i = 0; i < exportDir->NumberOfNames; i++)
+	{
+		const char* name = (const char*)((LPBYTE)baseAddress + names[i]);
+		DWORD functionRVA = functions[ordinals[i]];
+
+		FARPROC functionAddress = (FARPROC)((LPBYTE)baseAddress + functionRVA);
+
+		// Store the function address in the IAT
+		*(FARPROC*)((LPBYTE)baseAddress + ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].VirtualAddress + i * sizeof(FARPROC)) = functionAddress;
+	}
+
+	return true;
+}
+
+void TrackAndFreeDLLs()
+{
+	while (!shouldExit)
+	{
+		LPVOID baseAddress = loadedModule;
+
+		if (!IsDLLInUse(baseAddress))
+		{
+			// Call DllMain with DLL_PROCESS_DETACH
+			PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
+			PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((BYTE*)baseAddress + dosHeader->e_lfanew);
+			typedef BOOL(WINAPI* DllMain_t)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved);
+			DllMain_t dllMain = (DllMain_t)((BYTE*)baseAddress + ntHeader->OptionalHeader.AddressOfEntryPoint);
+			dllMain((HINSTANCE)baseAddress, DLL_PROCESS_DETACH, NULL);
+
+			// Free the virtual memory
+			VirtualFree(baseAddress, 0, MEM_RELEASE);
+		}		
+
+		Sleep(1000); // Check every second
+	}
+}
+
+bool IsDLLInUse(LPVOID baseAddress)
+{
+	DWORD handleCount = 0;
+
+	// Check if there are any open handles to the DLL
+	if (GetHandleInformation((HANDLE)baseAddress, &handleCount))
+	{
+		// If handleCount is greater than 0, the DLL is still in use
+		return handleCount > 0;
+	}
+
+	// If GetHandleInformation fails, we assume the DLL is in use to be safe
+	return true;
+}
+
+FARPROC GetExportedFunction(LPVOID baseAddress, const char* functionName)
+{
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
+	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)baseAddress + dosHeader->e_lfanew);
+
+	IMAGE_DATA_DIRECTORY exportDirectory = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+	PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)((LPBYTE)baseAddress + exportDirectory.VirtualAddress);
+
+	PDWORD functions = (PDWORD)((LPBYTE)baseAddress + exportDir->AddressOfFunctions);
+	PDWORD names = (PDWORD)((LPBYTE)baseAddress + exportDir->AddressOfNames);
+	PWORD ordinals = (PWORD)((LPBYTE)baseAddress + exportDir->AddressOfNameOrdinals);
+
+	for (DWORD i = 0; i < exportDir->NumberOfNames; i++)
+	{
+		const char* name = (const char*)((LPBYTE)baseAddress + names[i]);
+		if (strcmp(name, functionName) == 0)
+		{
+			DWORD functionRVA = functions[ordinals[i]];
+			return (FARPROC)((LPBYTE)baseAddress + functionRVA);
+		}
+	}
+
+	return NULL;
 }
