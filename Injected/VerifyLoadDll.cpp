@@ -190,11 +190,11 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool 
 		thunkILT++;
 	}
 
-	if (load)
+	if (load && !original_LoadLibraryA)
 	{
 		original_LoadLibraryA = (pLoadLibraryA)thunkIAT->u1.Function;
 	}
-	else
+	else if (!original_GetProcAddress)
 	{
 		original_GetProcAddress = (pGetProcAddress)thunkIAT->u1.Function;
 	}
