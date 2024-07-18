@@ -39,6 +39,15 @@ pLoadLibraryA original_LoadLibraryA = NULL;
 typedef HMODULE(WINAPI* pGetProcAddress)(HMODULE, LPCSTR);
 pGetProcAddress original_GetProcAddress = NULL;
 
+/*
+ * Entry point for the DLL
+ * Hooks the LoadLibraryA and GetProcAddress functions when the DLL is attached to a process
+ *
+ * @param hModule Handle to the DLL module
+ * @param ul_reason_for_call Reason for calling the function
+ * @param lpReserved Reserved parameter
+ * @return TRUE if the initialization succeeds, FALSE otherwise
+ */
 BOOL APIENTRY DllMain(HMODULE hModule,
 	DWORD  ul_reason_for_call,
 	LPVOID lpReserved
@@ -66,11 +75,15 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 	return TRUE;
 }
 
+/*
+ * Custom implementation of LoadLibraryA
+ * Loads the DLL manually using LoadDllManually and starts a thread to track and free DLLs
+ *
+ * @param lpLibFileName Name of the library to load
+ * @return Handle to the loaded module, or NULL if the operation fails
+ */
 HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 {
-	// printf("LoadLibraryAndCheckDll called with: %s\n", lpLibFileName);
-	// std::cin.get();
-
 	HMODULE hDataFile = LoadLibraryExA(lpLibFileName, NULL, LOAD_LIBRARY_AS_DATAFILE);
 
 	if (hDataFile)
@@ -87,6 +100,15 @@ HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 	return NULL;
 }
 
+/*
+ * Implements function hooking by modifying the Import Address Table (IAT)
+ *
+ * @param func_to_hook Name of the function to hook
+ * @param DLL_to_hook Name of the DLL containing the function to hook
+ * @param new_func_address Address of the new function to replace the original
+ * @param load True if hooking LoadLibraryA, false if hooking GetProcAddress
+ * @return 1 if successful, 0 if failed
+ */
 int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool load)
 {
 	PIMAGE_DOS_HEADER dosHeader;
@@ -159,7 +181,8 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool 
 		return 0;
 	}
 
-	while (thunkILT->u1.AddressOfData != 0 && !(thunkILT->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
+	while (thunkILT->u1.AddressOfData != 0 && !(thunkILT->u1.Ordinal & IMAGE_ORDINAL_FLAG)) 
+	{
 		nameData = (PIMAGE_IMPORT_BY_NAME)(baseAddress + thunkILT->u1.AddressOfData);
 		if (!strcmp(func_to_hook, (char*)nameData->Name))
 			break;
@@ -185,8 +208,16 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool 
 	return 1;
 }
 
+/*
+ * Manually loads a DLL into memory
+ * Performs necessary relocations, resolves imports, and calls the DLL's entry point
+ *
+ * @param hModule Handle to the module to load
+ * @return Handle to the manually loaded module, or NULL if the operation fails
+ */
 HMODULE LoadDllManually(HMODULE hModule)
 {
+	// Fixing the pointer to point to the 'M' instead of 'Z'
 	hModule = (HMODULE)((ULONG_PTR)hModule & ~((ULONG_PTR)0xffff));
 	
 	// Get the DOS and NT headers
@@ -273,6 +304,13 @@ HMODULE LoadDllManually(HMODULE hModule)
 	return (HMODULE)newBase;
 }
 
+/*
+ * Performs base relocations if the DLL is loaded at a different address than its preferred base address
+ *
+ * @param newBase New base address of the loaded DLL
+ * @param delta Difference between the preferred and actual load addresses
+ * @return true if successful, false otherwise
+ */
 bool RelocateImageBase(LPVOID newBase, ULONG_PTR delta)
 {
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)newBase;
@@ -311,6 +349,12 @@ bool RelocateImageBase(LPVOID newBase, ULONG_PTR delta)
 	return true;
 }
 
+/*
+ * Resolves the imported functions for the manually loaded DLL
+ *
+ * @param newBase Base address of the manually loaded DLL
+ * @return true if successful, false otherwise
+ */
 bool ResolveImports(LPVOID newBase)
 {
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)newBase;
@@ -359,6 +403,12 @@ bool ResolveImports(LPVOID newBase)
 	return true;
 }
 
+/*
+ * Processes the export table of the manually loaded DLL
+ *
+ * @param baseAddress Base address of the manually loaded DLL
+ * @return true if successful, false otherwise
+ */
 bool ProcessExports(LPVOID baseAddress)
 {
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
@@ -388,6 +438,9 @@ bool ProcessExports(LPVOID baseAddress)
 	return true;
 }
 
+/*
+ * Runs in a separate thread to monitor DLL usage and free unused DLLs
+ */
 void TrackAndFreeDLLs()
 {
 	while (!shouldExit)
@@ -411,6 +464,12 @@ void TrackAndFreeDLLs()
 	}
 }
 
+/*
+ * Checks if a DLL is currently in use
+ *
+ * @param baseAddress Base address of the DLL to check
+ * @return true if the DLL is in use, false otherwise
+ */
 bool IsDLLInUse(LPVOID baseAddress)
 {
 	DWORD handleCount = 0;
@@ -426,6 +485,14 @@ bool IsDLLInUse(LPVOID baseAddress)
 	return true;
 }
 
+/*
+ * Custom implementation of GetProcAddress
+ * Retrieves the address of an exported function from the manually loaded DLL
+ *
+ * @param baseAddress Base address of the manually loaded DLL
+ * @param functionName Name of the function to retrieve
+ * @return Address of the exported function, or NULL if not found
+ */
 FARPROC GetExportedFunction(LPVOID baseAddress, const char* functionName)
 {
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddress;
