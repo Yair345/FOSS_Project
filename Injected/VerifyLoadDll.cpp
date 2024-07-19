@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <psapi.h>
 #include <iostream>
+#include "verify.h"
 
 
 int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool load);
@@ -86,15 +87,24 @@ HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 {
 	HMODULE hDataFile = LoadLibraryExA(lpLibFileName, NULL, LOAD_LIBRARY_AS_DATAFILE);
 
+	// Fixing the pointer to point to the 'M' instead of 'Z'
+	hDataFile = (HMODULE)((ULONG_PTR)hDataFile & ~((ULONG_PTR)0xffff));
+
 	if (hDataFile)
 	{
-		// if verify
-		LPVOID executableDll = LoadDllManually(hDataFile);
+		if (VerifyDllFromHModule(hDataFile))
+		{
+			// if verify
+			LPVOID executableDll = LoadDllManually(hDataFile);
 
-		std::thread trackingThread(TrackAndFreeDLLs);
-		trackingThread.detach();
+			std::thread trackingThread(TrackAndFreeDLLs);
+			trackingThread.detach();
 
-		return (HMODULE)executableDll;
+			return (HMODULE)executableDll;
+		}
+
+		printf("The file %s is not verified\n", lpLibFileName);
+		return NULL;
 	}
 
 	return NULL;
@@ -217,9 +227,6 @@ int hook(PCSTR func_to_hook, PCSTR DLL_to_hook, UINT_PTR new_func_address, bool 
  */
 HMODULE LoadDllManually(HMODULE hModule)
 {
-	// Fixing the pointer to point to the 'M' instead of 'Z'
-	hModule = (HMODULE)((ULONG_PTR)hModule & ~((ULONG_PTR)0xffff));
-	
 	// Get the DOS and NT headers
 	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
 	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((LPBYTE)hModule + dosHeader->e_lfanew);
