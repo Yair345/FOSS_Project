@@ -1,16 +1,36 @@
 #include "pch.h"
 #include <TlHelp32.h>
 #include <tlhelp32.h>
+#include <string>
 
 
-#define NAME L"test_exe.exe" // proccess's name
 #define WIN32_LEAN_AND_MEAN
 #define BUFSIZE 4096
 
 DWORD PIDFind(const std::wstring& processName);
 
-int main()
+int main(int argc, char **argv)
 {
+	if (argc < 2) 
+	{
+		std::cout << "Usage: " << argv[0] << " <process_name>" << std::endl;
+		return 1;
+	}
+
+	// Convert argv[1] to wstring
+	std::wstring processName;
+	int wchars_num = MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, NULL, 0);
+	if (wchars_num > 0) 
+	{
+		processName.resize(wchars_num);
+		MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, &processName[0], wchars_num);
+	}
+	else 
+	{
+		std::cout << "Error converting process name to wide string" << std::endl;
+		return 1;
+	}
+
 	LPCSTR dllname = "Injected.dll"; //the dll is in the injector project file
 	CHAR  dllPath[BUFSIZE];
 	LPSTR* pPath = NULL;
@@ -22,7 +42,7 @@ int main()
 		return -1;
 	}
 
-	DWORD targetPID = PIDFind(NAME); // Find target process PID
+	DWORD targetPID = PIDFind(processName); // Find target process PID
 	DWORD err; // for errors
 
 	HMODULE moduleHandle = GetModuleHandleA("KERNEL32.dll"); // get KERNEL32.dll handle (where LoadLibraryA at)
