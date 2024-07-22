@@ -7,7 +7,7 @@ cd C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64
 makecert -sky signature -r -n "CN=RootCert" -pe -a sha256 -len 2048 -ss MY -cy authority -sv RootCert.pvk RootCert.cer
 makecert -pe -n "CN=CodeSignCert" -ss my -sr LocalMachine -a sha256 -sky signature -cy end -ic RootCert.cer -iv RootCert.pvk -sv CodeSignCert.pvk CodeSignCert.cer
 pvk2pfx -pvk CodeSignCert.pvk -spc CodeSignCert.cer -pfx CodeSignCert.pfx -po <YOUR_PASSWORD>
-signtool sign /f CodeSignCert.pfx /p <YOUR_PASSWORD> /t http://timestamp.digicert.com <FILE_PATH>
+signtool sign /f CodeSignCert.pfx /fd SHA256 /p <YOUR_PASSWORD> /t http://timestamp.digicert.com <FILE_PATH>
 ```
 Then import this unauthorized certificate to the authorized certificates file by 
 
