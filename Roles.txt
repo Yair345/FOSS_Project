@@ -1,0 +1,7 @@
+Injection/Injection.cpp - DLL Injection and find process.
+Injected/VerifyLoaDll.cpp - IAT Hooking and reflective loading.
+Injected/verify.cpp - Verification of dll from the RAM.
+
+Report/Safe Loader - FOSS 2024.pdf - Report
+
+signing/sign.md - explanation of how to do the signing process.

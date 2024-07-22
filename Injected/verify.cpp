@@ -28,7 +28,7 @@ BOOL verifyFileSignature(LPCWSTR oldfilePath)
 	winTrustData.dwUnionChoice = WTD_CHOICE_FILE;
 	winTrustData.pFile = &fileData;
 	winTrustData.dwUIChoice = WTD_UI_NONE;
-	winTrustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+	winTrustData.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
 	winTrustData.dwProvFlags = WTD_SAFER_FLAG;
 	winTrustData.dwStateAction = WTD_STATEACTION_VERIFY;
 	GUID policyGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;

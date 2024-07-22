@@ -92,9 +92,9 @@ HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 
 	if (hDataFile)
 	{
+		// if verify
 		if (VerifyDllFromHModule(hDataFile))
 		{
-			// if verify
 			LPVOID executableDll = LoadDllManually(hDataFile);
 
 			std::thread trackingThread(TrackAndFreeDLLs);
@@ -104,6 +104,7 @@ HMODULE WINAPI LoadLibraryAndCheckDll(LPCSTR lpLibFileName)
 		}
 
 		printf("The file %s is not verified\n", lpLibFileName);
+		FreeLibrary(hDataFile);
 		return NULL;
 	}
 

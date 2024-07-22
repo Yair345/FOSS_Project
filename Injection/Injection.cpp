@@ -8,6 +8,7 @@
 #define BUFSIZE 4096
 
 DWORD PIDFind(const std::wstring& processName);
+std::wstring ConvertToWideString(const std::string& str);
 
 int main(int argc, char **argv)
 {
@@ -17,19 +18,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	// Convert argv[1] to wstring
-	std::wstring processName;
-	int wchars_num = MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, NULL, 0);
-	if (wchars_num > 0) 
-	{
-		processName.resize(wchars_num);
-		MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, &processName[0], wchars_num);
-	}
-	else 
-	{
-		std::cout << "Error converting process name to wide string" << std::endl;
-		return 1;
-	}
+	// Convert argv[1] to string
+	std::string processName = argv[1];
 
 	LPCSTR dllname = "Injected.dll"; //the dll is in the injector project file
 	CHAR  dllPath[BUFSIZE];
@@ -42,7 +32,7 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	DWORD targetPID = PIDFind(processName); // Find target process PID
+	DWORD targetPID = PIDFind(ConvertToWideString(processName)); // Find target process PID
 	DWORD err; // for errors
 
 	HMODULE moduleHandle = GetModuleHandleA("KERNEL32.dll"); // get KERNEL32.dll handle (where LoadLibraryA at)
@@ -118,4 +108,13 @@ DWORD PIDFind(const std::wstring& processName) // Finds the PID by his name
 	}
 	CloseHandle(processesSnapshot);
 	return 0;
+}
+
+std::wstring ConvertToWideString(const std::string& str)
+{
+	if (str.empty()) return std::wstring();
+	int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
+	std::wstring wstrTo(size_needed, 0);
+	MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+	return wstrTo;
 }
