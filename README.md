@@ -10,4 +10,4 @@ Sometimes a trusted high-authorization EXE can load DLLs without adequately veri
 Our solution involves a signer program and a validating program. The signer program signs the DLLs. The validating program uses **IAT hooking** to intercept the EXE's DLLs loading proccess, verify the DLL's signature, and load only trusted DLLs by **Refelctive DLL loading**.
 
 
-You can find further information by reading Roles.txt and watching the demo video.
+You can find further information by reading the report, Roles.txt and watching the demo video.
